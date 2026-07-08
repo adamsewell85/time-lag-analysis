@@ -24,6 +24,16 @@ LINEAR PROFILES
     Stable             : -0.02 <= slope <= 0.02 — consistent performance
     Directional Change : slope > 0.02  — performance diverging over time
 
+SIGNIFICANCE
+    The pairwise distances are not mutually independent (each game contributes
+    to multiple comparisons), so parametric p-values are inflated. The linear
+    slope significance that drives profile classification is therefore assessed
+    by a permutation test: game order is reshuffled n_perm times to build an
+    empirical null distribution of the slope, and p is the proportion of
+    |permuted slopes| >= |observed slope|. The linear-vs-polynomial comparison
+    keeps the parametric ANOVA F-test with visual inspection (a plain order
+    shuffle is not a valid null for an isolated nested term).
+
 DEPENDENCIES
     pip install pandas numpy scipy matplotlib
 """
@@ -40,7 +50,8 @@ from scipy import stats
 # Core analysis function
 # =============================================================================
 
-def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bool = False) -> dict:
+def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bool = False,
+                      n_perm: int = 5000, seed: int = 42) -> dict:
     """
     Run time lag analysis on a tidy match-level dataframe.
 
@@ -53,6 +64,10 @@ def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bo
         Set True if df contains a 'result' column.
     poly : bool
         Set True to also fit and compare a degree-2 polynomial model.
+    n_perm : int
+        Number of permutations for the linear-slope significance test.
+    seed : int
+        Random seed for the permutation test (reproducibility).
 
     Returns
     -------
@@ -115,8 +130,11 @@ def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bo
             # --- Linear model ---
             x = kpi_df["sqrt_lag"].values
             y = kpi_df["distance"].values
-            slope, intercept, r, p_linear, _ = stats.linregress(x, y)
+            slope, intercept, r, _p_parametric, _ = stats.linregress(x, y)
             r2_linear = r ** 2
+
+            # Permutation test of the slope (game-order shuffle) -> empirical p
+            p_linear = _perm_slope_pvalue(values, slope, n_perm, seed)
 
             linear_profile = _classify_profile(slope, p_linear)
             linear_formula = _format_formula(slope, intercept)
@@ -378,6 +396,37 @@ def time_lag_poly_plot(df: pd.DataFrame):
 # =============================================================================
 # Internal helpers
 # =============================================================================
+
+def _perm_slope_pvalue(values: np.ndarray, obs_slope: float,
+                       n_perm: int = 5000, seed: int = 42) -> float:
+    """
+    Empirical p-value for the time-lag regression slope via a game-order
+    permutation. The square-root lag values are fixed across permutations, so
+    only the pairwise distances are recomputed; the slope is obtained in closed
+    form (slope = sum(w * distance)) for speed.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    n = len(values)
+    if n < 3:
+        return np.nan
+
+    idx = np.array(list(combinations(range(n), 2)))
+    i, j = idx[:, 0], idx[:, 1]
+    lagv = np.sqrt(np.abs(i - j))
+    lc = lagv - lagv.mean()
+    w = lc / np.sum(lc ** 2)              # slope = sum(w * distance)
+
+    rng = np.random.default_rng(seed)
+    abs_obs = abs(obs_slope)
+    count = 0
+    for _ in range(n_perm):
+        vp = rng.permutation(values)
+        dp = np.abs(vp[i] - vp[j])
+        if abs(np.sum(w * dp)) >= abs_obs:
+            count += 1
+    return (count + 1) / (n_perm + 1)
+
 
 def _classify_profile(slope: float, p_value: float) -> str:
     if np.isnan(p_value):

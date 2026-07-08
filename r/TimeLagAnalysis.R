@@ -24,6 +24,17 @@
 #   Stable            : -0.02 <= slope <= 0.02 — consistent performance
 #   Directional Change: slope > 0.02  — performance diverging over time
 #
+# SIGNIFICANCE
+#   Because the pairwise distances are not mutually independent (each game
+#   contributes to multiple comparisons), parametric p-values are inflated.
+#   The linear-slope significance that drives profile classification is therefore
+#   assessed by a permutation test: game order is randomly reshuffled n_perm
+#   times to build an empirical null distribution of the slope, and the empirical
+#   p-value is the proportion of |permuted slopes| >= |observed slope|.
+#   The linear-vs-polynomial comparison uses the parametric ANOVA F-test (a plain
+#   order shuffle is not a valid null for an isolated nested term) together with
+#   visual inspection, as recommended for guarding against overfitting.
+#
 # DEPENDENCIES
 #   install.packages(c("dplyr", "tidyr", "purrr", "vegan", "ggplot2", "readxl"))
 # =============================================================================
@@ -35,7 +46,69 @@ library(vegan)
 library(ggplot2)
 library(readxl)
 
-timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE) {      
+# -----------------------------------------------------------------------------
+# Permutation test of significance for a single ordered (z-scored) KPI series.
+# Reshuffles game order n_perm times to build an empirical null distribution of
+# the slope (and, when poly = TRUE, the linear-vs-quadratic F). The square-root
+# lag values are fixed across permutations, so only the pairwise distances are
+# recomputed. Returns the observed slope and F, empirical p-values, and df.
+# -----------------------------------------------------------------------------
+timeLagPermTest <- function(values, n_perm = 5000, seed = 42, poly = FALSE) {
+  values <- values[!is.na(values)]
+  n <- length(values)
+  if (n < 3) {
+    return(list(slope = NA_real_, p_linear = NA_real_,
+                obs_F = NA_real_, p_poly = NA_real_, df_res = NA_integer_))
+  }
+
+  cb   <- utils::combn(n, 2)
+  i    <- cb[1, ]; j <- cb[2, ]
+  lagv <- sqrt(abs(i - j))
+
+  # Closed-form simple-regression slope for the fixed x (lagv): slope = sum(w * d)
+  lc     <- lagv - mean(lagv)
+  wslope <- lc / sum(lc^2)
+
+  # Residual-maker matrices for the linear-vs-quadratic F (fixed x, so precompute)
+  if (poly) {
+    X1     <- cbind(1, lagv)
+    X2     <- cbind(1, lagv, lagv^2)
+    M1     <- diag(length(lagv)) - X1 %*% solve(crossprod(X1)) %*% t(X1)
+    M2     <- diag(length(lagv)) - X2 %*% solve(crossprod(X2)) %*% t(X2)
+    df_res <- length(lagv) - 3
+    Fstat  <- function(d) {
+      rss1 <- as.numeric(t(d) %*% M1 %*% d)
+      rss2 <- as.numeric(t(d) %*% M2 %*% d)
+      (rss1 - rss2) / (rss2 / df_res)
+    }
+  } else {
+    df_res <- NA_integer_
+  }
+
+  obs_dist  <- abs(values[i] - values[j])
+  obs_slope <- sum(wslope * obs_dist)
+  obs_F     <- if (poly) Fstat(obs_dist) else NA_real_
+
+  set.seed(seed)
+  perm_slope <- numeric(n_perm)
+  perm_F     <- if (poly) numeric(n_perm) else NULL
+  for (b in seq_len(n_perm)) {
+    dp <- abs((vp <- sample(values))[i] - vp[j])
+    perm_slope[b] <- sum(wslope * dp)
+    if (poly) perm_F[b] <- Fstat(dp)
+  }
+
+  list(
+    slope    = obs_slope,
+    p_linear = (sum(abs(perm_slope) >= abs(obs_slope)) + 1) / (n_perm + 1),
+    obs_F    = obs_F,
+    p_poly   = if (poly) (sum(perm_F >= obs_F) + 1) / (n_perm + 1) else NA_real_,
+    df_res   = df_res
+  )
+}
+
+timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
+                            n_perm = 5000, seed = 42) {
   # --- Identify numeric columns (KPIs) ---
   numeric_cols <- names(df %>% select(where(is.numeric)))
   numeric_cols_kpi <- setdiff(numeric_cols, c("game", "date", "result"))      
@@ -206,7 +279,39 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE) {
       group_by(performanceIndicator, team) %>%
       group_modify(~ compute_model_info(.x, poly = poly)) %>%
       ungroup()
-    
+
+    # ---- Permutation test of significance for the linear slope ----
+    # A game-order shuffle is the correct null for the directional slope. The
+    # linear-vs-polynomial comparison is left on the parametric ANOVA F-test
+    # (see compute_model_info), since a plain order shuffle does not isolate the
+    # quadratic term in a nested model. Profiles below use the empirical p.
+    perm_df <- map_df(numeric_cols_team, function(colname) {
+      pr <- timeLagPermTest(team_data[[colname]], n_perm = n_perm,
+                            seed = seed, poly = FALSE)
+      tibble(
+        performanceIndicator = colname,
+        team                 = t,
+        obs_slope            = pr$slope,
+        Linear_p_perm        = pr$p_linear
+      )
+    })
+
+    model_info_df <- model_info_df %>%
+      left_join(perm_df, by = c("performanceIndicator", "team")) %>%
+      mutate(
+        Linear_Profile = dplyr::case_when(
+          is.na(Linear_p_perm) ~ NA_character_,
+          Linear_p_perm > 0.05 ~ "Stochastic",
+          obs_slope < -0.02    ~ "Convergence",
+          obs_slope <=  0.02   ~ "Stable",
+          TRUE                 ~ "Directional Change"
+        ),
+        Linear_p_value = ifelse(is.na(Linear_p_perm), NA_character_,
+                                ifelse(Linear_p_perm < 0.001, "<0.001",
+                                       sprintf("%.3f", Linear_p_perm)))
+      ) %>%
+      select(-any_of(c("obs_slope", "Linear_p_perm")))
+
     team_results <- team_results %>%
       left_join(
         model_info_df %>% select(any_of(c(

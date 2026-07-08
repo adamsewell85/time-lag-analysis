@@ -14,6 +14,8 @@ Available in both **R** and **Python**.
 
 Time Lag Analysis quantifies how performance diverges or stabilises across increasing temporal distances between matches. For each pair of games within a team's season, it computes the Euclidean distance between standardised performance indicators and regresses that distance against the square-root of the lag (number of games between the pair). The resulting slope and significance are used to classify each team–indicator combination into one of four performance profiles.
 
+Because each game contributes to many pairwise distances, those distances are not mutually independent and parametric p-values are inflated. Significance for the linear slope is therefore assessed with a **permutation test** (game order is reshuffled `n_perm` times to build an empirical null distribution of the slope). The optional linear-vs-polynomial comparison retains the parametric ANOVA F-test alongside visual inspection.
+
 ---
 
 ## Data Format
@@ -27,7 +29,10 @@ Your data should be structured as one row per match per team, with the following
 | `result` | character | Match outcome, e.g. `"Win"` / `"Loss"` — **optional**, enables win/loss colour coding in plots |
 | KPI columns | numeric | Any number of performance indicators (e.g. shots, passes, tackles) |
 
-An example dataset (`Euro2024M.xlsx`, sheet `per90`) is included. It contains per-90-minute match statistics for the four UEFA Euro 2024 (Men's) semifinalist teams.
+Two example datasets are included:
+
+- `Euro2024M.xlsx` (sheet `per90`) — per-90-minute match statistics for the four UEFA Euro 2024 (Men's) semifinalist teams (football).
+- `FIBA_WC_2023.xlsx` — team-efficiency and Four Factors indicators for the four medal-round teams at the 2023 FIBA Basketball World Cup (basketball).
 
 ---
 
@@ -91,7 +96,7 @@ See `r/example_analysis.R` / `python/example_analysis.py` for full worked exampl
 
 ### Linear Profiles (`profileSummary`)
 
-Each team–indicator combination is assigned one of four profiles based on the linear regression slope and p-value:
+Each team–indicator combination is assigned one of four profiles based on the linear regression slope and its permutation p-value:
 
 | Profile | Condition | Interpretation |
 |---------|-----------|----------------|
