@@ -29,10 +29,11 @@ Your data should be structured as one row per match per team, with the following
 | `result` | character | Match outcome, e.g. `"Win"` / `"Loss"` — **optional**, enables win/loss colour coding in plots |
 | KPI columns | numeric | Any number of performance indicators (e.g. shots, passes, tackles) |
 
-Two example datasets are included:
+Example datasets are included:
 
 - `Euro2024M.xlsx` (sheet `per90`) — per-90-minute match statistics for the four UEFA Euro 2024 (Men's) semifinalist teams (football).
-- `FIBA_WC_2023.xlsx` — team-efficiency and Four Factors indicators for the four medal-round teams at the 2023 FIBA Basketball World Cup (basketball).
+- `FIBA_WC_2023.xlsx` — analysis-ready team-efficiency and Four Factors indicators for the four medal-round teams at the 2023 FIBA Basketball World Cup (basketball).
+- `fiba_wc_2023_boxscores.xlsx` — the underlying raw box-score totals for the same four teams, so the basketball indicators can be reproduced. Indicators are defined as: possessions = FGA + 0.44·FTA + TOV − OREB; OFFRTG = points/possessions; DEFRTG = points allowed/possessions; eFG = (FGM + 0.5·3PM)/FGA; OREB% = OREB/(OREB + opponent DREB); TOV% = TOV/possessions; FTR = FTM/FGA.
 
 ---
 
