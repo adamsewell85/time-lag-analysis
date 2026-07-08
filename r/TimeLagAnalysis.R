@@ -28,9 +28,11 @@
 #   Because the pairwise distances are not mutually independent (each game
 #   contributes to multiple comparisons), parametric p-values are inflated.
 #   The linear-slope significance that drives profile classification is therefore
-#   assessed by a permutation test: game order is randomly reshuffled n_perm
-#   times to build an empirical null distribution of the slope, and the empirical
-#   p-value is the proportion of |permuted slopes| >= |observed slope|.
+#   assessed by a permutation test on game order, with the empirical p-value the
+#   proportion of |permuted slopes| >= |observed slope|. When the number of
+#   orderings (n!) is small (n <= 8, the usual tournament case) the null is
+#   enumerated exactly, so the p-value is exact and seed-independent; longer
+#   series fall back to n_perm random reshuffles.
 #   The linear-vs-polynomial comparison uses the parametric ANOVA F-test (a plain
 #   order shuffle is not a valid null for an isolated nested term) together with
 #   visual inspection, as recommended for guarding against overfitting.
@@ -47,63 +49,64 @@ library(ggplot2)
 library(readxl)
 
 # -----------------------------------------------------------------------------
-# Permutation test of significance for a single ordered (z-scored) KPI series.
-# Reshuffles game order n_perm times to build an empirical null distribution of
-# the slope (and, when poly = TRUE, the linear-vs-quadratic F). The square-root
-# lag values are fixed across permutations, so only the pairwise distances are
-# recomputed. Returns the observed slope and F, empirical p-values, and df.
+# All orderings of 1:n as a matrix (one permutation per row). Used to enumerate
+# the exact permutation null for short series.
 # -----------------------------------------------------------------------------
-timeLagPermTest <- function(values, n_perm = 5000, seed = 42, poly = FALSE) {
+.allPerms <- function(n) {
+  if (n == 1L) return(matrix(1L, 1L, 1L))
+  prev <- .allPerms(n - 1L)
+  m <- nrow(prev)
+  res <- matrix(0L, m * n, n)
+  r <- 1L
+  for (a in seq_len(m)) {
+    row <- prev[a, ]
+    for (pos in 0:(n - 1L)) {
+      res[r, ] <- append(row, n, after = pos)
+      r <- r + 1L
+    }
+  }
+  res
+}
+
+# -----------------------------------------------------------------------------
+# Permutation test of significance for a single ordered (z-scored) KPI series.
+# Reshuffles game order to build a null distribution of the slope. When the
+# number of orderings (n!) is small enough the null is enumerated exactly, so
+# the p-value is exact and seed-independent — the usual case for tournament
+# series (n <= 8). Longer series fall back to n_perm random permutations. The
+# square-root lag values are fixed, so only pairwise distances are recomputed
+# and the slope is obtained in closed form (slope = sum(w * distance)).
+# -----------------------------------------------------------------------------
+timeLagPermTest <- function(values, n_perm = 5000, seed = 42, max_exact = 50000) {
   values <- values[!is.na(values)]
   n <- length(values)
-  if (n < 3) {
-    return(list(slope = NA_real_, p_linear = NA_real_,
-                obs_F = NA_real_, p_poly = NA_real_, df_res = NA_integer_))
-  }
+  if (n < 3) return(list(slope = NA_real_, p_linear = NA_real_))
 
   cb   <- utils::combn(n, 2)
   i    <- cb[1, ]; j <- cb[2, ]
   lagv <- sqrt(abs(i - j))
-
-  # Closed-form simple-regression slope for the fixed x (lagv): slope = sum(w * d)
   lc     <- lagv - mean(lagv)
   wslope <- lc / sum(lc^2)
 
-  # Residual-maker matrices for the linear-vs-quadratic F (fixed x, so precompute)
-  if (poly) {
-    X1     <- cbind(1, lagv)
-    X2     <- cbind(1, lagv, lagv^2)
-    M1     <- diag(length(lagv)) - X1 %*% solve(crossprod(X1)) %*% t(X1)
-    M2     <- diag(length(lagv)) - X2 %*% solve(crossprod(X2)) %*% t(X2)
-    df_res <- length(lagv) - 3
-    Fstat  <- function(d) {
-      rss1 <- as.numeric(t(d) %*% M1 %*% d)
-      rss2 <- as.numeric(t(d) %*% M2 %*% d)
-      (rss1 - rss2) / (rss2 / df_res)
-    }
-  } else {
-    df_res <- NA_integer_
+  obs_slope <- sum(wslope * abs(values[i] - values[j]))
+
+  if (factorial(n) <= max_exact) {                 # exact: enumerate all orderings
+    P <- .allPerms(n)
+    exact <- TRUE
+  } else {                                         # approximate: random permutations
+    set.seed(seed)
+    P <- matrix(0L, n_perm, n)
+    for (b in seq_len(n_perm)) P[b, ] <- sample(n)
+    exact <- FALSE
   }
 
-  obs_dist  <- abs(values[i] - values[j])
-  obs_slope <- sum(wslope * obs_dist)
-  obs_F     <- if (poly) Fstat(obs_dist) else NA_real_
-
-  set.seed(seed)
-  perm_slope <- numeric(n_perm)
-  perm_F     <- if (poly) numeric(n_perm) else NULL
-  for (b in seq_len(n_perm)) {
-    dp <- abs((vp <- sample(values))[i] - vp[j])
-    perm_slope[b] <- sum(wslope * dp)
-    if (poly) perm_F[b] <- Fstat(dp)
-  }
+  VP     <- matrix(values[as.vector(t(P))], ncol = n, byrow = TRUE)
+  slopes <- as.vector(abs(VP[, i] - VP[, j]) %*% wslope)
+  hits   <- sum(abs(slopes) >= abs(obs_slope) - 1e-12)
 
   list(
     slope    = obs_slope,
-    p_linear = (sum(abs(perm_slope) >= abs(obs_slope)) + 1) / (n_perm + 1),
-    obs_F    = obs_F,
-    p_poly   = if (poly) (sum(perm_F >= obs_F) + 1) / (n_perm + 1) else NA_real_,
-    df_res   = df_res
+    p_linear = if (exact) hits / nrow(P) else (hits + 1) / (n_perm + 1)
   )
 }
 
@@ -286,8 +289,7 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
     # (see compute_model_info), since a plain order shuffle does not isolate the
     # quadratic term in a nested model. Profiles below use the empirical p.
     perm_df <- map_df(numeric_cols_team, function(colname) {
-      pr <- timeLagPermTest(team_data[[colname]], n_perm = n_perm,
-                            seed = seed, poly = FALSE)
+      pr <- timeLagPermTest(team_data[[colname]], n_perm = n_perm, seed = seed)
       tibble(
         performanceIndicator = colname,
         team                 = t,

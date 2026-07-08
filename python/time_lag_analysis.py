@@ -28,9 +28,11 @@ SIGNIFICANCE
     The pairwise distances are not mutually independent (each game contributes
     to multiple comparisons), so parametric p-values are inflated. The linear
     slope significance that drives profile classification is therefore assessed
-    by a permutation test: game order is reshuffled n_perm times to build an
-    empirical null distribution of the slope, and p is the proportion of
-    |permuted slopes| >= |observed slope|. The linear-vs-polynomial comparison
+    by a permutation test on game order, with p the proportion of
+    |permuted slopes| >= |observed slope|. When the number of orderings (n!) is
+    small (n <= 8, the usual tournament case) the null is enumerated exactly, so
+    p is exact and seed-independent; longer series use n_perm random reshuffles.
+    The linear-vs-polynomial comparison
     keeps the parametric ANOVA F-test with visual inspection (a plain order
     shuffle is not a valid null for an isolated nested term).
 
@@ -40,7 +42,8 @@ DEPENDENCIES
 
 import numpy as np
 import pandas as pd
-from itertools import combinations
+from math import factorial
+from itertools import combinations, permutations
 from scipy.stats import f as f_dist
 from scipy.spatial.distance import euclidean
 from scipy import stats
@@ -398,12 +401,18 @@ def time_lag_poly_plot(df: pd.DataFrame):
 # =============================================================================
 
 def _perm_slope_pvalue(values: np.ndarray, obs_slope: float,
-                       n_perm: int = 5000, seed: int = 42) -> float:
+                       n_perm: int = 5000, seed: int = 42,
+                       max_exact: int = 50000) -> float:
     """
     Empirical p-value for the time-lag regression slope via a game-order
     permutation. The square-root lag values are fixed across permutations, so
     only the pairwise distances are recomputed; the slope is obtained in closed
     form (slope = sum(w * distance)) for speed.
+
+    When the number of possible orderings (n!) is small enough, every ordering
+    is enumerated so the p-value is exact and independent of the seed — which is
+    the usual case for tournament-length series (n <= 8). For longer series it
+    falls back to `n_perm` random permutations.
     """
     values = np.asarray(values, dtype=float)
     values = values[~np.isnan(values)]
@@ -416,16 +425,19 @@ def _perm_slope_pvalue(values: np.ndarray, obs_slope: float,
     lagv = np.sqrt(np.abs(i - j))
     lc = lagv - lagv.mean()
     w = lc / np.sum(lc ** 2)              # slope = sum(w * distance)
-
-    rng = np.random.default_rng(seed)
     abs_obs = abs(obs_slope)
-    count = 0
-    for _ in range(n_perm):
-        vp = rng.permutation(values)
-        dp = np.abs(vp[i] - vp[j])
-        if abs(np.sum(w * dp)) >= abs_obs:
-            count += 1
-    return (count + 1) / (n_perm + 1)
+
+    if factorial(n) <= max_exact:                       # exact: enumerate all orderings
+        P = np.array(list(permutations(range(n))))
+        dist = np.abs(values[P][:, i] - values[P][:, j])
+        slopes = dist @ w
+        return float(np.sum(np.abs(slopes) >= abs_obs - 1e-12) / len(slopes))
+
+    rng = np.random.default_rng(seed)                   # approximate: random permutations
+    P = np.array([rng.permutation(n) for _ in range(n_perm)])
+    dist = np.abs(values[P][:, i] - values[P][:, j])
+    slopes = dist @ w
+    return float((np.sum(np.abs(slopes) >= abs_obs - 1e-12) + 1) / (n_perm + 1))
 
 
 def _classify_profile(slope: float, p_value: float) -> str:
