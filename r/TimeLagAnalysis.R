@@ -500,9 +500,27 @@ timeLagLinearPlot <- function(df) {
     scale_y_continuous(position = "right") +
     labs(
       x = "Time Lag (sqrt)",
-      y = NULL
+      y = "Distance (z-score)"
     )
-  
+
+  # Per-panel p-value labels (uses the permutation p in Linear_p_value, if present)
+  if ("Linear_p_value" %in% names(df)) {
+    pval_df <- df %>%
+      group_by(team, performanceIndicator) %>%
+      summarise(Linear_p_value = dplyr::first(Linear_p_value), .groups = "drop") %>%
+      mutate(label = ifelse(grepl("^<", Linear_p_value),
+                            paste0("p", Linear_p_value),
+                            paste0("p=", Linear_p_value)))
+    p <- p + geom_text(
+      data = pval_df,
+      aes(x = Inf, y = Inf, label = label),
+      inherit.aes = FALSE,
+      hjust = 1.15, vjust = 1.5,
+      size = 4.5,
+      family = "Times New Roman"
+    )
+  }
+
   # Colour scales
   if (has_winpair) {
     p <- p + scale_color_manual(
