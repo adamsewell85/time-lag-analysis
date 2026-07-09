@@ -39,6 +39,9 @@ lag_data <- results$lagData %>%
 # -----------------------------------------------------------------------------
 # 3. Helper: build one figure for a set of KPIs with display labels
 # -----------------------------------------------------------------------------
+# Physical size is kept small (with high dpi) so the theme's fixed point-size
+# fonts render large relative to the panels, matching the published figures.
+# pixels = width_in * dpi ; height 9 in * 600 dpi = 5400 px (as in the originals).
 make_figure <- function(kpi_keys, kpi_labels, file, width_in) {
   plot_df <- lag_data %>%
     filter(performanceIndicator %in% kpi_keys) %>%
@@ -50,9 +53,9 @@ make_figure <- function(kpi_keys, kpi_labels, file, width_in) {
     filename = file.path(out_dir, file),
     plot     = p,
     width    = width_in,
-    height   = 18,
+    height   = 9,
     units    = "in",
-    dpi      = 300,
+    dpi      = 600,
     device   = "jpeg"
   )
   message("Wrote ", file.path(out_dir, file))
@@ -65,12 +68,12 @@ make_figure(
   kpi_keys   = c("offrtg", "defrtg"),
   kpi_labels = c("OFFRTG", "DEFRTG"),
   file       = "Figure 2 - Efficiency (OFFRTG DEFRTG).jpg",
-  width_in   = 11
+  width_in   = 5.5
 )
 
 make_figure(
   kpi_keys   = c("efg_pct", "tov_pct", "oreb_pct", "ftr"),
   kpi_labels = c("eFG", "TOV%", "OREB%", "FTR"),
   file       = "Figure 3 - Technical (eFG TOV OREB FTR).jpg",
-  width_in   = 20
+  width_in   = 10
 )
