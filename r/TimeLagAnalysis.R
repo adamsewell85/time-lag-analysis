@@ -527,7 +527,7 @@ timeLagLinearPlot <- function(df) {
       values = c(
         winpair_colours,
         "Significant" = "black",
-        "Not Significant" = "grey40"
+        "Not Significant" = "grey60"
       ),
       breaks = c(
         "Significant", "Not Significant",
@@ -539,7 +539,7 @@ timeLagLinearPlot <- function(df) {
     p <- p + scale_color_manual(
       values = c(
         "Significant" = "black",
-        "Not Significant" = "grey40"
+        "Not Significant" = "grey60"
       ),
       breaks = c("Significant", "Not Significant"),
       name = NULL
