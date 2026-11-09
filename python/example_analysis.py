@@ -47,6 +47,6 @@ fig_linear = time_lag_linear_plot(plot_df)
 plt.show()
 
 # Polynomial plot — compares linear (dashed) vs polynomial (solid) fit
-# with ANOVA result and delta-R2 annotated per panel
+# with the permutation F test, p and delta-R2 annotated per panel
 fig_poly = time_lag_poly_plot(plot_df)
 plt.show()

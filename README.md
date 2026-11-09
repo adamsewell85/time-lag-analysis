@@ -12,9 +12,9 @@ Available in both **R** and **Python**.
 
 ## What is Time Lag Analysis?
 
-Time Lag Analysis quantifies how performance diverges or stabilises across increasing temporal distances between matches. For each pair of games within a team's season, it computes the Euclidean distance between standardised performance indicators and regresses that distance against the square-root of the lag (number of games between the pair). The resulting slope and significance are used to classify each team–indicator combination into one of four performance profiles.
+Time Lag Analysis quantifies how performance diverges or stabilises across increasing temporal distances between matches. For each pair of games within a team's season, it computes the Euclidean distance between standardised performance indicators and regresses that distance against the square-root of the lag (number of games between the pair). The resulting slope and significance are used to classify each team–indicator combination into one of three profiles (no detectable pattern, increasing dissimilarity or decreasing dissimilarity).
 
-Because each game contributes to many pairwise distances, those distances are not mutually independent and parametric p-values are inflated. Significance for the linear slope is therefore assessed with a **permutation test** (game order is reshuffled `n_perm` times to build an empirical null distribution of the slope). The optional linear-vs-polynomial comparison retains the parametric ANOVA F-test alongside visual inspection.
+Because each game contributes to many pairwise distances, those distances are not mutually independent and parametric p-values are inflated. Significance for the linear slope is therefore assessed with a **permutation test** (game order is reshuffled `n_perm` times to build an empirical null distribution of the slope). The optional linear-vs-non-linear (quadratic) comparison is tested the same way, and Benjamini–Hochberg false discovery rate adjusted p-values are provided.
 
 ---
 
@@ -96,14 +96,21 @@ See `r/example_analysis.R` / `python/example_analysis.py` for full worked exampl
 
 ### Linear Profiles (`profileSummary`)
 
-Each team–indicator combination is assigned one of four profiles based on the linear regression slope and its permutation p-value:
+Each team–indicator combination is assigned one of three profiles, decided by the permutation p-value of the linear slope and the sign of the slope:
 
 | Profile | Condition | Interpretation |
 |---------|-----------|----------------|
-| Stochastic | p > 0.05 | No significant relationship between lag and performance distance |
-| Convergence | slope < -0.02 | Performance becomes more similar as lag increases |
-| Stable | -0.02 ≤ slope ≤ 0.02 | Consistent level of variability regardless of lag |
-| Directional Change | slope > 0.02 | Performance diverges as lag increases |
+| No detectable pattern | p > 0.05 | Dissimilarity does not change with lag more than expected if game order carried no information |
+| Increasing dissimilarity | p ≤ 0.05 and slope > 0 | Games further apart are more different from one another |
+| Decreasing dissimilarity | p ≤ 0.05 and slope < 0 | Games further apart are more similar to one another |
+
+The size of the slope is the rate at which dissimilarity changes with lag (steeper = faster, flatter = slower), so there is no separate "stable" class.
+
+**Significance.** The p-value comes from a permutation test on game order (all orderings are enumerated when n ≤ 8, so it is exact and seed-free). `Linear_p_BH` / `linear_p_bh` is the Benjamini–Hochberg false discovery rate adjusted p-value across all series in one call (use one call per case study).
+
+### Non-linear (quadratic) comparison (`poly = TRUE`)
+
+The F statistic for the quadratic term is tested with the same permutation approach (`Quad_Report` / `quad_report`: F, df and permutation p; `Delta_R2` is the change in R²). `Quad_p_BH` / `quad_p_bh` is the FDR-adjusted p, and `Model_Recommendation` is "Non-linear" only where that adjusted p is below 0.05, otherwise "Linear". A significant result means curvature beyond that expected from random game order (not curvature net of a linear trend).
 
 ### Descriptive Statistics (`descriptiveStatistics`)
 

@@ -18,11 +18,13 @@ OUTPUTS  (returned as a dict)
     profile_summary       : regression coefficients, R2, p-values, and profiles
     descriptive_statistics: mean, SD, Lag-1 MAD, and CoV per team x KPI
 
-LINEAR PROFILES
-    Stochastic         : p > 0.05  — no significant relationship with lag
-    Convergence        : slope < -0.02 — performance stabilising over time
-    Stable             : -0.02 <= slope <= 0.02 — consistent performance
-    Directional Change : slope > 0.02  — performance diverging over time
+LINEAR PROFILES  (decided on the permutation p-value and the sign of the slope)
+    No detectable pattern   : p > 0.05
+    Increasing dissimilarity: p <= 0.05 and slope > 0 (games further apart are more
+                              different than expected if game order carried no information)
+    Decreasing dissimilarity: p <= 0.05 and slope < 0
+    The size of the slope is the rate at which dissimilarity changes with lag
+    (steeper = faster, flatter = slower); there is no separate "stable" class.
 
 SIGNIFICANCE
     The pairwise distances are not mutually independent (each game contributes
@@ -32,9 +34,13 @@ SIGNIFICANCE
     |permuted slopes| >= |observed slope|. When the number of orderings (n!) is
     small (n <= 8, the usual tournament case) the null is enumerated exactly, so
     p is exact and seed-independent; longer series use n_perm random reshuffles.
-    The linear-vs-polynomial comparison
-    keeps the parametric ANOVA F-test with visual inspection (a plain order
-    shuffle is not a valid null for an isolated nested term).
+    The linear-vs-non-linear (quadratic) comparison uses the same approach: the
+    F statistic for the quadratic term is recomputed under every ordering of the
+    games (_quad_perm_test). A significant result means curvature beyond that
+    expected if game order carried no information (not curvature net of a linear
+    trend). Benjamini-Hochberg false discovery rate (FDR) adjusted p-values
+    (linear_p_bh, quad_p_bh) are added across all series in one call, i.e. per
+    case study; the non-linear model is recommended only where quad_p_bh < 0.05.
 
 DEPENDENCIES
     pip install pandas numpy scipy matplotlib
@@ -44,7 +50,6 @@ import numpy as np
 import pandas as pd
 from math import factorial
 from itertools import combinations, permutations
-from scipy.stats import f as f_dist
 from scipy.spatial.distance import euclidean
 from scipy import stats
 
@@ -156,6 +161,7 @@ def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bo
                 "performance_indicator": kpi,
                 "r2": r2_linear_fmt,
                 "linear_p_value": p_linear_fmt,
+                "linear_p_perm": p_linear,
                 "linear_profile": linear_profile,
                 "linear_formula": linear_formula,
             }
@@ -172,23 +178,23 @@ def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bo
                 poly_formula = _format_poly_formula(a, b, c)
                 delta_r2 = r2_poly - r2_linear
 
-                # ANOVA F-test: linear vs polynomial
-                anova_report, model_recommendation = _anova_comparison(
-                    x, y, slope, intercept, poly_coeffs, r2_linear, r2_poly, delta_r2
-                )
+                # Permutation F test: linear vs non-linear (quadratic term)
+                q = _quad_perm_test(values, n_perm=n_perm, seed=seed)
+                quad_report = (f"F(1, {q['df2']}) = {q['F']:.2f}, p = {_format_p(q['p_perm'])}"
+                               if not np.isnan(q["F"]) else None)
 
                 kpi_df["poly_r2"] = f"{r2_poly:.2f}" if not np.isnan(r2_poly) else None
                 kpi_df["poly_formula"] = poly_formula
-                kpi_df["anova_report"] = anova_report
+                kpi_df["quad_report"] = quad_report
+                kpi_df["quad_p_perm"] = q["p_perm"]
                 kpi_df["delta_r2"] = f"{delta_r2:.2f}" if not np.isnan(delta_r2) else None
-                kpi_df["model_recommendation"] = model_recommendation
 
                 summary_row.update({
                     "poly_r2": f"{r2_poly:.2f}" if not np.isnan(r2_poly) else None,
                     "poly_formula": poly_formula,
-                    "anova_report": anova_report,
+                    "quad_report": quad_report,
+                    "quad_p_perm": q["p_perm"],
                     "delta_r2": f"{delta_r2:.2f}" if not np.isnan(delta_r2) else None,
-                    "model_recommendation": model_recommendation,
                 })
 
             all_lag_rows.append(kpi_df)
@@ -196,6 +202,20 @@ def time_lag_analysis(df: pd.DataFrame, results_included: bool = False, poly: bo
 
     lag_data = pd.concat(all_lag_rows, ignore_index=True) if all_lag_rows else pd.DataFrame()
     profile_summary = pd.DataFrame(all_summary_rows)
+
+    # Benjamini-Hochberg FDR across all series in this call (one case study)
+    if not profile_summary.empty:
+        profile_summary["linear_p_bh"] = _bh_adjust(profile_summary["linear_p_perm"].values)
+        adj_cols = ["linear_p_bh"]
+        if "quad_p_perm" in profile_summary.columns:
+            profile_summary["quad_p_bh"] = _bh_adjust(profile_summary["quad_p_perm"].values)
+            profile_summary["model_recommendation"] = np.where(
+                profile_summary["quad_p_bh"] < 0.05, "Non-linear", "Linear")
+            adj_cols += ["quad_p_bh", "model_recommendation"]
+        if not lag_data.empty:
+            lag_data = lag_data.merge(
+                profile_summary[["team", "performance_indicator"] + adj_cols],
+                on=["team", "performance_indicator"], how="left")
 
     # --- Descriptive statistics (on original unstandardised values) ---
     descriptive_rows = []
@@ -315,12 +335,12 @@ def time_lag_linear_plot(df: pd.DataFrame):
 def time_lag_poly_plot(df: pd.DataFrame):
     """
     Faceted plot comparing linear (dashed) and polynomial (solid) regression.
-    ANOVA result and delta-R2 are annotated in each panel.
+    Permutation F, p and delta-R2 are annotated in each panel.
 
     Parameters
     ----------
     df : pd.DataFrame — the 'lag_data' output from time_lag_analysis()
-                        with poly=True (must contain 'anova_report', 'delta_r2')
+                        with poly=True (must contain 'quad_report', 'delta_r2')
 
     Returns
     -------
@@ -328,9 +348,9 @@ def time_lag_poly_plot(df: pd.DataFrame):
     """
     import matplotlib.pyplot as plt
 
-    required = {"anova_report", "delta_r2"}
+    required = {"quad_report", "delta_r2"}
     if not required.issubset(df.columns):
-        raise ValueError("poly plot requires 'anova_report' and 'delta_r2' columns. "
+        raise ValueError("poly plot requires 'quad_report' and 'delta_r2' columns. "
                          "Run time_lag_analysis() with poly=True.")
 
     teams = df["team"].unique()
@@ -367,12 +387,12 @@ def time_lag_poly_plot(df: pd.DataFrame):
                 ax.plot(x_line, np.polyval(coeffs, x_line), color="grey", linewidth=1, linestyle="-")
 
             # Annotation
-            anova_txt = subset["anova_report"].iloc[0]
+            quad_txt = subset["quad_report"].iloc[0]
             delta_txt = subset["delta_r2"].iloc[0]
-            if anova_txt and delta_txt:
+            if quad_txt and delta_txt:
                 ax.text(
                     0.98, 0.98,
-                    f"{anova_txt}\nΔR² = {delta_txt}",
+                    f"{quad_txt}\nΔR² = {delta_txt}",
                     transform=ax.transAxes,
                     fontsize=7,
                     ha="right", va="top",
@@ -444,12 +464,10 @@ def _classify_profile(slope: float, p_value: float) -> str:
     if np.isnan(p_value):
         return "Unknown"
     if p_value > 0.05:
-        return "Stochastic"
-    if slope < -0.02:
-        return "Convergence"
-    if slope <= 0.02:
-        return "Stable"
-    return "Directional Change"
+        return "No detectable pattern"
+    if slope > 0:
+        return "Increasing dissimilarity"
+    return "Decreasing dissimilarity"
 
 
 def _format_p(p: float) -> str:
@@ -471,27 +489,59 @@ def _format_poly_formula(a: float, b: float, c: float) -> str:
     return f"y = {a:.2f}x² {b_sign} {abs(b):.2f}x {c_sign} {abs(c):.2f}"
 
 
-def _anova_comparison(x, y, slope, intercept, poly_coeffs, r2_lin, r2_poly, delta_r2):
-    n = len(x)
+def _quad_perm_test(values, n_perm: int = 5000, seed: int = 42, max_exact: int = 50000) -> dict:
+    """
+    Permutation test for the quadratic term (linear vs non-linear comparison).
+    Statistic: F for the quadratic term of lm(d ~ x) vs lm(d ~ x + x^2), x = sqrt(lag),
+    recomputed under every ordering of the games (exact for n <= 8, otherwise
+    n_perm random orderings). p = share of orderings with F >= observed F.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[~np.isnan(values)]
+    n = len(values)
+    nan = {"F": np.nan, "df2": np.nan, "p_perm": np.nan, "dR2": np.nan}
     if n < 4:
-        return None, "Linear"
+        return nan
+    idx = np.array(list(combinations(range(n), 2)))
+    i, j = idx[:, 0], idx[:, 1]
+    x = np.sqrt(np.abs(i - j)); m = len(x)
+    X1 = np.column_stack([np.ones(m), x])
+    X2 = np.column_stack([np.ones(m), x, x ** 2])
+    M1 = np.eye(m) - X1 @ np.linalg.solve(X1.T @ X1, X1.T)
+    M2 = np.eye(m) - X2 @ np.linalg.solve(X2.T @ X2, X2.T)
 
-    y_lin_pred = slope * x + intercept
-    y_poly_pred = np.polyval(poly_coeffs, x)
+    def fstat(D):
+        r1 = np.einsum("ij,ij->i", D @ M1, D)
+        r2 = np.einsum("ij,ij->i", D @ M2, D)
+        return (r1 - r2) / (r2 / (m - 3))
 
-    ss_res_lin = np.sum((y - y_lin_pred) ** 2)
-    ss_res_poly = np.sum((y - y_poly_pred) ** 2)
+    if factorial(n) <= max_exact:
+        P = np.array(list(permutations(range(n)))); exact = True
+    else:
+        rng = np.random.default_rng(seed)
+        P = np.array([rng.permutation(n) for _ in range(n_perm)]); exact = False
+    VP = values[P]
+    f_perm = fstat(np.abs(VP[:, i] - VP[:, j]))
+    d = np.abs(values[i] - values[j])
+    f_obs = float(fstat(d[None, :])[0])
+    r1, r2 = float(d @ M1 @ d), float(d @ M2 @ d)
+    hits = int(np.sum(f_perm >= f_obs - 1e-9))
+    p = hits / len(P) if exact else (hits + 1) / (n_perm + 1)
+    return {"F": f_obs, "df2": m - 3, "p_perm": float(p),
+            "dR2": (r1 - r2) / float(np.sum((d - d.mean()) ** 2))}
 
-    df_diff = 1          # polynomial adds 1 parameter
-    df_res = n - 3       # polynomial uses 3 parameters
 
-    if df_res <= 0 or ss_res_poly <= 0:
-        return None, "Linear"
-
-    f_val = ((ss_res_lin - ss_res_poly) / df_diff) / (ss_res_poly / df_res)
-    p_val = 1 - f_dist.cdf(f_val, df_diff, df_res)
-
-    report = f"F({df_diff}, {df_res}) = {f_val:.2f}, p = {_format_p(p_val)}"
-    recommendation = "Poly" if (p_val < 0.05 and delta_r2 > 0.01) else "Linear"
-
-    return report, recommendation
+def _bh_adjust(p) -> np.ndarray:
+    """Benjamini-Hochberg adjusted p-values (NaN kept as NaN, m = number of non-NaN tests)."""
+    p = np.asarray(p, dtype=float)
+    out = np.full(p.shape, np.nan)
+    ok = ~np.isnan(p)
+    pv = p[ok]; m = len(pv)
+    if m == 0:
+        return out
+    order = np.argsort(pv)
+    adj = pv[order] * m / (np.arange(m) + 1)
+    adj = np.minimum.accumulate(adj[::-1])[::-1]
+    res = np.empty(m); res[order] = np.clip(adj, 0, 1)
+    out[ok] = res
+    return out

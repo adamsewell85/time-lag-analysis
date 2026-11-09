@@ -18,11 +18,13 @@
 #   profileSummary       : regression coefficients, R², p-values, and profiles
 #   descriptiveStatistics: mean, SD, Lag-1 MAD, and CoV per team × KPI
 #
-# LINEAR PROFILES
-#   Stochastic        : p > 0.05  — no significant relationship with lag
-#   Convergence       : slope < -0.02 — performance stabilising over time
-#   Stable            : -0.02 <= slope <= 0.02 — consistent performance
-#   Directional Change: slope > 0.02  — performance diverging over time
+# LINEAR PROFILES (decided on the permutation p-value and the sign of the slope)
+#   No detectable pattern  : p > 0.05
+#   Increasing dissimilarity: p <= 0.05 and slope > 0 (games further apart are
+#                             more different than expected if game order carried no information)
+#   Decreasing dissimilarity: p <= 0.05 and slope < 0
+#   The size of the slope is the rate at which dissimilarity changes with lag
+#   (steeper = faster, flatter = slower); there is no separate "stable" class.
 #
 # SIGNIFICANCE
 #   Because the pairwise distances are not mutually independent (each game
@@ -33,9 +35,14 @@
 #   orderings (n!) is small (n <= 8, the usual tournament case) the null is
 #   enumerated exactly, so the p-value is exact and seed-independent; longer
 #   series fall back to n_perm random reshuffles.
-#   The linear-vs-polynomial comparison uses the parametric ANOVA F-test (a plain
-#   order shuffle is not a valid null for an isolated nested term) together with
-#   visual inspection, as recommended for guarding against overfitting.
+#   The linear-vs-non-linear (quadratic) comparison uses the same approach: the
+#   F statistic for the quadratic term is recomputed under every ordering of the
+#   games (quadPermTest). A significant result means curvature beyond that
+#   expected if game order carried no information (not curvature net of a
+#   linear trend).
+#   Benjamini-Hochberg false discovery rate (FDR) adjusted p-values are added
+#   (Linear_p_BH, Quad_p_BH) across all series in one call, i.e. per case
+#   study. The non-linear model is recommended only where Quad_p_BH < 0.05.
 #
 # DEPENDENCIES
 #   install.packages(c("dplyr", "tidyr", "purrr", "vegan", "ggplot2", "readxl"))
@@ -108,6 +115,44 @@ timeLagPermTest <- function(values, n_perm = 5000, seed = 42, max_exact = 50000)
     slope    = obs_slope,
     p_linear = if (exact) hits / nrow(P) else (hits + 1) / (n_perm + 1)
   )
+}
+
+# -----------------------------------------------------------------------------
+# Permutation test for linear vs non-linear (quadratic) on a single ordered
+# (z-scored) KPI series. The statistic is the F for the quadratic term of the
+# nested comparison lm(d ~ x) vs lm(d ~ x + x^2) (x = sqrt(lag)), recomputed
+# under every ordering of the games (exact for n <= 8) so the dependence between
+# pairwise distances is kept. p = share of orderings with F >= observed F.
+# -----------------------------------------------------------------------------
+quadPermTest <- function(values, n_perm = 5000, seed = 42, max_exact = 50000) {
+  values <- values[!is.na(values)]
+  n <- length(values)
+  if (n < 4) return(list(F = NA_real_, df2 = NA_integer_, p_perm = NA_real_, dR2 = NA_real_))
+  cb <- utils::combn(n, 2); i <- cb[1, ]; j <- cb[2, ]
+  x  <- sqrt(abs(i - j)); m <- length(x)
+  X1 <- cbind(1, x); X2 <- cbind(1, x, x^2)
+  M1 <- diag(m) - X1 %*% solve(crossprod(X1), t(X1))
+  M2 <- diag(m) - X2 %*% solve(crossprod(X2), t(X2))
+  Fstat <- function(D) {                      # rows = orderings, cols = pairs
+    r1 <- rowSums((D %*% M1) * D); r2 <- rowSums((D %*% M2) * D)
+    (r1 - r2) / (r2 / (m - 3))
+  }
+  if (factorial(n) <= max_exact) {
+    P <- .allPerms(n); exact <- TRUE
+  } else {
+    set.seed(seed); P <- matrix(0L, n_perm, n)
+    for (b in seq_len(n_perm)) P[b, ] <- sample(n)
+    exact <- FALSE
+  }
+  VP    <- matrix(values[as.vector(t(P))], ncol = n, byrow = TRUE)
+  Fperm <- Fstat(abs(VP[, i] - VP[, j]))
+  dobs  <- abs(values[i] - values[j])
+  Fobs  <- Fstat(matrix(dobs, nrow = 1))
+  r1 <- sum(dobs * (M1 %*% dobs)); r2 <- sum(dobs * (M2 %*% dobs))
+  hits <- sum(Fperm >= Fobs - 1e-9)
+  list(F = as.numeric(Fobs), df2 = m - 3L,
+       p_perm = if (exact) hits / nrow(P) else (hits + 1) / (n_perm + 1),
+       dR2 = (r1 - r2) / sum((dobs - mean(dobs))^2))
 }
 
 timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
@@ -185,13 +230,11 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
       linear_profile <- if (is.na(linear_p)) {
         NA
       } else if (linear_p > 0.05) {
-        "Stochastic"
-      } else if (linear_slope < -0.02) {
-        "Convergence"
-      } else if (linear_slope >= -0.02 & linear_slope <= 0.02) {
-        "Stable"
+        "No detectable pattern"
+      } else if (linear_slope > 0) {
+        "Increasing dissimilarity"
       } else {
-        "Directional Change"
+        "Decreasing dissimilarity"
       }
       
       linear_formula_text <- paste0(
@@ -239,38 +282,12 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
           if (poly_p < 0.001) "<0.001" else sprintf("%.3f", poly_p)
         } else NA
         
-        ANOVA_Report <- NA
-        Model_Recommendation <- "Linear"
-        Delta_R2 <- NA
-        
-        try({
-          anova_result <- anova(linear_fit, poly_fit)
-          if (!is.null(anova_result) && nrow(anova_result) >= 2) {
-            df_diff <- anova_result$Df[2]
-            df_res  <- anova_result$Res.Df[2]
-            F_val   <- anova_result$F[2]
-            p_val   <- anova_result$`Pr(>F)`[2]
-            
-            if (!is.na(F_val) && is.finite(F_val) && df_res > 0) {
-              ANOVA_Report <- sprintf("F(%d, %d) = %.2f, p = %s",
-                                      df_diff, df_res, F_val,
-                                      ifelse(!is.na(p_val) && p_val < 0.001, "<0.001",
-                                             sprintf("%.3f", p_val)))
-            }
-            
-            Delta_R2 <- poly_r2 - linear_r2
-            if (!is.na(p_val) && p_val < 0.05 && Delta_R2 > 0.01) {
-              Model_Recommendation <- "Poly"
-            }
-          }
-        }, silent = TRUE)
+        Delta_R2 <- poly_r2 - linear_r2
         
         out <- out %>% mutate(
           poly_R2 = poly_R2_formatted,
           poly_p_value = poly_p_formatted,
           poly_Formula = poly_formula_text,
-          ANOVA_Report = ANOVA_Report,
-          Model_Recommendation = Model_Recommendation,
           Delta_R2 = if (!is.na(Delta_R2)) sprintf("%.2f", Delta_R2) else NA
         )
       }
@@ -284,10 +301,9 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
       ungroup()
 
     # ---- Permutation test of significance for the linear slope ----
-    # A game-order shuffle is the correct null for the directional slope. The
-    # linear-vs-polynomial comparison is left on the parametric ANOVA F-test
-    # (see compute_model_info), since a plain order shuffle does not isolate the
-    # quadratic term in a nested model. Profiles below use the empirical p.
+    # A game-order shuffle gives the null for the slope: profiles below use the
+    # empirical (permutation) p. The quadratic term is tested the same way
+    # (quadPermTest), and both are FDR-adjusted across series after the team loop.
     perm_df <- map_df(numeric_cols_team, function(colname) {
       pr <- timeLagPermTest(team_data[[colname]], n_perm = n_perm, seed = seed)
       tibble(
@@ -298,34 +314,49 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
       )
     })
 
+    if (poly) {
+      quad_df <- map_df(numeric_cols_team, function(colname) {
+        q <- quadPermTest(team_data[[colname]], n_perm = n_perm, seed = seed)
+        tibble(
+          performanceIndicator = colname,
+          team                 = t,
+          Quad_p_perm          = q$p_perm,
+          Quad_Report          = sprintf("F(1, %d) = %.2f, p = %s", q$df2, q$F,
+                                         ifelse(q$p_perm < 0.001, "<0.001",
+                                                sprintf("%.3f", q$p_perm)))
+        )
+      })
+      perm_df <- perm_df %>% left_join(quad_df, by = c("performanceIndicator", "team"))
+    }
+
     model_info_df <- model_info_df %>%
       left_join(perm_df, by = c("performanceIndicator", "team")) %>%
       mutate(
         Linear_Profile = dplyr::case_when(
           is.na(Linear_p_perm) ~ NA_character_,
-          Linear_p_perm > 0.05 ~ "Stochastic",
-          obs_slope < -0.02    ~ "Convergence",
-          obs_slope <=  0.02   ~ "Stable",
-          TRUE                 ~ "Directional Change"
+          Linear_p_perm > 0.05 ~ "No detectable pattern",
+          obs_slope > 0        ~ "Increasing dissimilarity",
+          TRUE                 ~ "Decreasing dissimilarity"
         ),
         Linear_p_value = ifelse(is.na(Linear_p_perm), NA_character_,
                                 ifelse(Linear_p_perm < 0.001, "<0.001",
                                        sprintf("%.3f", Linear_p_perm)))
       ) %>%
-      select(-any_of(c("obs_slope", "Linear_p_perm")))
+      select(-any_of("obs_slope"))
 
     team_results <- team_results %>%
       left_join(
         model_info_df %>% select(any_of(c(
           "performanceIndicator",
           "team",
-          "Model_Recommendation",
           "Linear_p_value",
+          "Linear_p_perm",
+          "Quad_p_perm",
           "Linear_Profile",
           "Linear_Formula",
           "poly_Formula",
           "poly_p_value",
-          "ANOVA_Report",
+          "Quad_Report",
           "Delta_R2"
         ))),
         by = c("performanceIndicator", "team")
@@ -345,7 +376,23 @@ timeLagAnalysis <- function(df, resultsIncluded = FALSE, poly = FALSE,
     all_results <- bind_rows(all_results, team_results)
   }
   
-  # DESCRIPTIVE STATISTICS TABLE
+  # ---- Benjamini-Hochberg FDR across all series in this call (one case study) ----
+  summary_results <- summary_results %>%
+    mutate(Linear_p_BH = p.adjust(Linear_p_perm, method = "BH"))
+  if ("Quad_p_perm" %in% names(summary_results)) {
+    summary_results <- summary_results %>%
+      mutate(
+        Quad_p_BH            = p.adjust(Quad_p_perm, method = "BH"),
+        Model_Recommendation = ifelse(!is.na(Quad_p_BH) & Quad_p_BH < 0.05,
+                                      "Non-linear", "Linear")
+      )
+  }
+  all_results <- all_results %>%
+    left_join(summary_results %>%
+                select(performanceIndicator, team,
+                       any_of(c("Linear_p_BH", "Quad_p_BH", "Model_Recommendation"))),
+              by = c("performanceIndicator", "team"))
+
   # DESCRIPTIVE STATISTICS TABLE
   descriptive_table <- df %>%
     select(team, all_of(numeric_cols_kpi)) %>%
@@ -565,7 +612,7 @@ timeLagPolyPlot <- function(df) {
     "distance",
     "team",
     "performanceIndicator",
-    "ANOVA_Report",
+    "Quad_Report",
     "Delta_R2"
   )
   
@@ -580,12 +627,12 @@ timeLagPolyPlot <- function(df) {
   annotation_df <- df %>%
     group_by(team, performanceIndicator) %>%
     summarise(
-      ANOVA_Report = unique(ANOVA_Report),
+      Quad_Report = unique(Quad_Report),
       Delta_R2 = unique(Delta_R2),
       .groups = "drop"
     ) %>%
     mutate(
-      label = paste0(ANOVA_Report, "\nΔR² = ", Delta_R2),
+      label = paste0(Quad_Report, "\nΔR² = ", Delta_R2),
       y_pos = Inf - 10  # small offset below top
     )
   

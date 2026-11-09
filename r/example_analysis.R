@@ -46,5 +46,5 @@ descriptive <- results$descriptiveStatistics # mean, SD, Lag-1 MAD, CoV
 timeLagLinearPlot(plot_df)
 
 # Polynomial plot — compares linear (dashed) vs polynomial (solid) fit
-# with ANOVA result and delta-R2 annotated per panel
+# with the permutation F test, p and delta-R2 annotated per panel
 timeLagPolyPlot(plot_df)
